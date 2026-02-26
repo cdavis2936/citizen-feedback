@@ -462,7 +462,24 @@ def api_login():
             return jsonify({"error": "Username and password are required"}), 400
 
         user_data = users_collection.find_one({'username': username})
-        if user_data and check_password_hash(user_data['password'], password):
+        is_valid_password = False
+
+        if user_data:
+            stored_password = user_data.get('password')
+            if isinstance(stored_password, str) and stored_password:
+                try:
+                    # Normal path for hashed passwords.
+                    is_valid_password = check_password_hash(stored_password, password)
+                except (ValueError, TypeError):
+                    # Legacy fallback for old plaintext accounts; migrate on success.
+                    is_valid_password = stored_password == password
+                    if is_valid_password:
+                        users_collection.update_one(
+                            {'_id': user_data['_id']},
+                            {'$set': {'password': generate_password_hash(password)}}
+                        )
+
+        if user_data and is_valid_password:
             # Regenerate session to prevent session fixation attacks
             session.clear()
             session.permanent = True
