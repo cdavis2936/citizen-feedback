@@ -29,13 +29,18 @@ load_dotenv()
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'cmfs_secret_key_change_this_in_production')
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SECURE'] = False
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-frontend_origins = os.getenv(
-    'FRONTEND_ORIGINS',
-    'http://localhost:3000,http://127.0.0.1:3000'
-)
+is_production = os.getenv('FLASK_ENV') == 'production' or bool(os.getenv('RENDER'))
+app.config['SESSION_COOKIE_SECURE'] = is_production
+app.config['SESSION_COOKIE_SAMESITE'] = 'None' if is_production else 'Lax'
+frontend_origins = os.getenv('FRONTEND_ORIGINS', '')
 allowed_origins = [origin.strip() for origin in frontend_origins.split(',') if origin.strip()]
+if not allowed_origins:
+    # Allow local development and Netlify deploy/preview subdomains by default.
+    allowed_origins = [
+        r"https://.*\.netlify\.app",
+        'http://localhost:3000',
+        'http://127.0.0.1:3000'
+    ]
 CORS(app, supports_credentials=True, origins=allowed_origins, methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 socketio = SocketIO(
     app,
@@ -53,6 +58,7 @@ basedir = os.path.abspath(os.path.dirname(__file__))
 # Configurations
 
 # MongoDB configuration
+MONGO_URI = os.getenv('MONGO_URI') or os.getenv('MONGODB_URI')
 MONGO_HOST = os.getenv('MONGO_HOST', 'localhost')
 MONGO_PORT = int(os.getenv('MONGO_PORT', 27017))
 MONGO_DB = os.getenv('MONGO_DB', 'citizen_feedback')
@@ -60,10 +66,18 @@ MONGO_USERNAME = os.getenv('MONGO_USERNAME', '')
 MONGO_PASSWORD = os.getenv('MONGO_PASSWORD', '')
 
 # Connect to MongoDB
-if MONGO_USERNAME and MONGO_PASSWORD:
-    mongo_uri = f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}"
+if MONGO_URI:
+    mongo_uri = MONGO_URI
 else:
-    mongo_uri = f"mongodb://{MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}"
+    if 'your_' in MONGO_HOST or 'your_mongo_connection_string' in MONGO_HOST:
+        raise ValueError(
+            "Invalid MongoDB host placeholder detected. Set MONGO_URI (recommended) "
+            "or valid MONGO_HOST/MONGO_PORT/MONGO_DB values."
+        )
+    if MONGO_USERNAME and MONGO_PASSWORD:
+        mongo_uri = f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}"
+    else:
+        mongo_uri = f"mongodb://{MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}"
 
 client = MongoClient(mongo_uri)
 db = client[MONGO_DB]
@@ -452,16 +466,21 @@ def api_login():
         if not data:
             return jsonify({"error": "Missing JSON data"}), 400
 
-        username = data.get('username')
+        username_or_email = (data.get('username') or data.get('email') or '').strip()
         password = data.get('password')
 
         # Logging for debugging (sanitized - only username, no password)
-        logging.debug("Login attempt for user: %s", username)
+        logging.debug("Login attempt for user: %s", username_or_email)
 
-        if not username or not password:
-            return jsonify({"error": "Username and password are required"}), 400
+        if not username_or_email or not password:
+            return jsonify({"error": "Username/email and password are required"}), 400
 
-        user_data = users_collection.find_one({'username': username})
+        user_data = users_collection.find_one({
+            '$or': [
+                {'username': username_or_email},
+                {'email': username_or_email}
+            ]
+        })
         is_valid_password = False
 
         if user_data:
